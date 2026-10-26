@@ -147,6 +147,19 @@ function Pencil:init()
     table.insert(self.ui.active_widgets, self) -- Always receive events even when hidden
 
     self.ui.menu:registerToMainMenu(self)
+
+    -- Refresh strategy while a stroke is being drawn.
+    -- On Android every refresh, however small the region, blits the whole
+    -- screen buffer to the native window (framebuffer_android:_updateWindow),
+    -- which on a 13" 3200x2400 panel costs tens of milliseconds; asking for
+    -- it 60 times a second starves the main loop (ANR). Cap it at ~10 Hz there.
+    -- On monochrome e-ink the fast (A2/DU) waveform is far quicker than the
+    -- UI waveform, which is only needed for colour panels.
+    if Device:isAndroid() then
+        self.refresh_interval_ms = 100
+    end
+    self.stroke_refresh_fast = not (Device.hasColorScreen and Device:hasColorScreen())
+
     self.strokes = {}
     self.page_strokes = {}  -- Index: page -> array of stroke indices
     self.annotation_groups = {}  -- Annotation groups for bookmark integration
@@ -715,8 +728,12 @@ function Pencil:addRawPoint(x, y)
             local ry = math.max(0, math.floor(r.y))
             local rw = math.min(Screen:getWidth() - rx, math.ceil(r.w))
             local rh = math.min(Screen:getHeight() - ry, math.ceil(r.h))
-            -- Use UI refresh mode for proper color rendering on color e-ink
-            Screen:refreshUI(rx, ry, rw, rh)
+            if self.stroke_refresh_fast then
+                Screen:refreshFast(rx, ry, rw, rh)
+            else
+                -- UI refresh mode for proper color rendering on color e-ink
+                Screen:refreshUI(rx, ry, rw, rh)
+            end
             self.dirty_region = nil
         end
     end
