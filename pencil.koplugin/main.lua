@@ -157,6 +157,18 @@ function Pencil:init()
     -- UI waveform, which is only needed for colour panels.
     if Device:isAndroid() then
         self.refresh_interval_ms = 100
+        -- Region-limited native window update (see android_fastblit.lua);
+        -- with it the per-refresh cost is small, so refresh more often.
+        local ok_fb, fastblit = pcall(require, "android_fastblit")
+        if ok_fb and type(fastblit) == "table" then
+            local ok_inst, fn = pcall(fastblit.install, Screen, logger)
+            if ok_inst and fn then
+                self.android_region_refresh = fn
+                self.refresh_interval_ms = 40
+            else
+                logger.warn("Pencil: Android region refresh unavailable:", tostring(fn))
+            end
+        end
     end
     self.stroke_refresh_fast = not (Device.hasColorScreen and Device:hasColorScreen())
 
@@ -728,7 +740,15 @@ function Pencil:addRawPoint(x, y)
             local ry = math.max(0, math.floor(r.y))
             local rw = math.min(Screen:getWidth() - rx, math.ceil(r.w))
             local rh = math.min(Screen:getHeight() - ry, math.ceil(r.h))
-            if self.stroke_refresh_fast then
+            if self.android_region_refresh then
+                local ok_r, err = pcall(self.android_region_refresh, rx, ry, rw, rh)
+                if not ok_r then
+                    logger.warn("Pencil: region refresh failed, falling back:", tostring(err))
+                    self.android_region_refresh = nil
+                    self.refresh_interval_ms = 100
+                    Screen:refreshFast(rx, ry, rw, rh)
+                end
+            elseif self.stroke_refresh_fast then
                 Screen:refreshFast(rx, ry, rw, rh)
             else
                 -- UI refresh mode for proper color rendering on color e-ink
