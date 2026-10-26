@@ -808,6 +808,12 @@ function Pencil:endRawStroke()
     self:scheduleDelayedRefresh()
 end
 
+function Pencil:setAndroidEinkEvery(n)
+    self.android_eink_every = n
+    if self.android_fastblit then self.android_fastblit.eink_every = n end
+    self:saveSettings()
+end
+
 -- On-screen timing readout for a finished stroke (debug aid; no log access needed).
 function Pencil:showTimingReport()
     local Notification = require("ui/widget/notification")
@@ -824,8 +830,8 @@ function Pencil:showTimingReport()
         end
     end
     local tr = Screen.getTouchRotation and Screen:getTouchRotation() or -1
-    local msg = string.format("%d pts %dms | cb %.2fms x%d | %s every %dms x%d%s | rot %d touch %d %dx%d",
-        pts, total_ms, cb_avg, cb_n, path, self.refresh_interval_ms, self.timing_refresh_n or 0, fb,
+    local msg = string.format("%d pts %dms | cb %.2fms x%d | %s every %dms x%d%s eink/%d | rot %d touch %d %dx%d",
+        pts, total_ms, cb_avg, cb_n, path, self.refresh_interval_ms, self.timing_refresh_n or 0, fb, self.android_eink_every or 1,
         Screen:getRotationMode(), tr, Screen:getWidth(), Screen:getHeight())
     logger.info("Pencil timing:", msg)
     UIManager:show(Notification:new{ text = msg, timeout = 6 })
@@ -1042,13 +1048,15 @@ end
 function Pencil:writeDebugLog(msg)
     if not self.input_debug_mode then return end
 
-    local log_path = self:getDebugLogPath()
-    local f = io.open(log_path, "a")
-    if f then
-        local timestamp = os.date("%H:%M:%S")
-        f:write(string.format("[%s] %s\n", timestamp, msg))
-        f:close()
+    -- Keep the handle open: opening and closing the file for every pen point
+    -- costs several ms on Android's storage and distorts timing.
+    if not self.debug_log_fh then
+        self.debug_log_fh = io.open(self:getDebugLogPath(), "a")
+        if not self.debug_log_fh then return end
     end
+    local timestamp = os.date("%H:%M:%S")
+    self.debug_log_fh:write(string.format("[%s] %s\n", timestamp, msg))
+    self.debug_log_fh:flush()
 end
 
 -- Clear the debug log file
@@ -1096,6 +1104,9 @@ function Pencil:loadSettings()
     self.experimental_pen_width = settings.experimental_pen_width or false
     self.experimental_color_picker = settings.experimental_color_picker or false
     self.experimental_text_highlight = settings.experimental_text_highlight or false
+    -- Android: e-ink update cadence while drawing (1 = each update, 4 = every 4th, 0 = none)
+    self.android_eink_every = settings.android_eink_every or 1
+    if self.android_fastblit then self.android_fastblit.eink_every = self.android_eink_every end
     -- Load pen color by name and look up the actual color value
     local color_name = settings.pen_color_name
     if color_name then
@@ -1132,6 +1143,7 @@ function Pencil:saveSettings()
         pen_color_name = self.tool_settings[TOOL_PEN].color_name,
         swap_eraser_and_highlighter = self.swap_eraser_and_highlighter,
         pen_width = self.tool_settings[TOOL_PEN].width,
+        android_eink_every = self.android_eink_every,
     })
 end
 
@@ -1367,6 +1379,22 @@ function Pencil:addToMainMenu(menu_items)
                     },
                 },
                 separator = true,
+            },
+            {
+                text = _("Android: e-ink update while drawing"),
+                help_text = _("How often the e-ink controller is asked to repaint during a stroke. Fewer updates can cut lag; the stroke is always fully drawn when the pen lifts."),
+                enabled_func = function() return self.android_fastblit ~= nil end,
+                sub_item_table = {
+                    { text = _("After every window update"), radio = true,
+                      checked_func = function() return self.android_eink_every == 1 end,
+                      callback = function() self:setAndroidEinkEvery(1) end },
+                    { text = _("Every 4th update"), radio = true,
+                      checked_func = function() return self.android_eink_every == 4 end,
+                      callback = function() self:setAndroidEinkEvery(4) end },
+                    { text = _("Never while drawing (system decides)"), radio = true,
+                      checked_func = function() return self.android_eink_every == 0 end,
+                      callback = function() self:setAndroidEinkEvery(0) end },
+                },
             },
             {
                 text = _("Show drawing timing on screen"),

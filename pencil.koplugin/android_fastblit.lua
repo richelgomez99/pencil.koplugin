@@ -17,6 +17,11 @@ local M = {}
 
 -- Timing counters, reset by the plugin at stroke start.
 M.stats = { n = 0, blit_us = 0, eink_us = 0 }
+-- How often to ask the e-ink controller to repaint while drawing:
+-- 1 = after every window update, N = every Nth, 0 = never (the delayed
+-- full refresh at stroke end still runs through KOReader).
+M.eink_every = 1
+local eink_counter = 0
 
 -- Returns a function refresh(x, y, w, h) in logical screen coordinates,
 -- or nil when not on Android / something needed is missing.
@@ -94,8 +99,12 @@ function M.install(Screen, logger)
         android.lib.ANativeWindow_unlockAndPost(window)
         local t1 = time.now()
 
-        if eink_full then
-            Screen:_updatePartial(fast, delay_fast, x, y, w, h)
+        if eink_full and M.eink_every > 0 then
+            eink_counter = eink_counter + 1
+            if eink_counter >= M.eink_every then
+                eink_counter = 0
+                Screen:_updatePartial(fast, delay_fast, x, y, w, h)
+            end
         end
         local t2 = time.now()
         local st = M.stats
