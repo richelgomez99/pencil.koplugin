@@ -164,6 +164,7 @@ function Pencil:init()
             local ok_inst, fn = pcall(fastblit.install, Screen, logger)
             if ok_inst and fn then
                 self.android_region_refresh = fn
+                self.android_fastblit = fastblit
                 self.refresh_interval_ms = 40
             else
                 logger.warn("Pencil: Android region refresh unavailable:", tostring(fn))
@@ -358,6 +359,13 @@ function Pencil:setupStylusCallback()
     -- Callback receives: input (Input object), slot (table with slot, id, x, y, tool, timev)
     -- Return true to "dominate" (remove from gesture detection)
     Input:registerStylusCallback(function(input, slot)
+        if plugin.show_timing then
+            local t0 = time.now()
+            local r = plugin:handleStylusSlot(input, slot)
+            plugin.timing_cb_n = (plugin.timing_cb_n or 0) + 1
+            plugin.timing_cb_us = (plugin.timing_cb_us or 0) + time.to_us(time.now() - t0)
+            return r
+        end
         return plugin:handleStylusSlot(input, slot)
     end)
 
@@ -667,6 +675,15 @@ function Pencil:startRawStroke()
     }
     self.last_refresh_time = time.now()
     self.dirty_region = nil  -- Clear any pending dirty region
+    if self.show_timing then
+        self.timing_cb_n, self.timing_cb_us = 0, 0
+        self.timing_refresh_n = 0
+        self.timing_t0 = time.now()
+        if self.android_fastblit then
+            local st = self.android_fastblit.stats
+            st.n, st.blit_us, st.eink_us = 0, 0, 0
+        end
+    end
     logger.dbg("Pencil: raw stroke started")
 end
 
@@ -740,6 +757,7 @@ function Pencil:addRawPoint(x, y)
             local ry = math.max(0, math.floor(r.y))
             local rw = math.min(Screen:getWidth() - rx, math.ceil(r.w))
             local rh = math.min(Screen:getHeight() - ry, math.ceil(r.h))
+            self.timing_refresh_n = (self.timing_refresh_n or 0) + 1
             if self.android_region_refresh then
                 local ok_r, err = pcall(self.android_region_refresh, rx, ry, rw, rh)
                 if not ok_r then
@@ -782,9 +800,35 @@ function Pencil:endRawStroke()
             self:writeDebugLog("endRawStroke: NOT SAVED (no current_stroke or no points)")
         end
     end
+    if self.show_timing then
+        self:showTimingReport()
+    end
     self.current_stroke = nil
     -- Schedule delayed refresh for clean display after writing stops
     self:scheduleDelayedRefresh()
+end
+
+-- On-screen timing readout for a finished stroke (debug aid; no log access needed).
+function Pencil:showTimingReport()
+    local Notification = require("ui/widget/notification")
+    local pts = self.current_stroke and #self.current_stroke.points or 0
+    local cb_n = self.timing_cb_n or 0
+    local cb_avg = cb_n > 0 and (self.timing_cb_us / cb_n / 1000) or 0
+    local total_ms = self.timing_t0 and time.to_ms(time.now() - self.timing_t0) or 0
+    local path = self.android_region_refresh and "region" or (self.stroke_refresh_fast and "fast" or "ui")
+    local fb = ""
+    if self.android_fastblit then
+        local st = self.android_fastblit.stats
+        if st.n > 0 then
+            fb = string.format(" blit %.1fms eink %.1fms x%d", st.blit_us / st.n / 1000, st.eink_us / st.n / 1000, st.n)
+        end
+    end
+    local tr = Screen.getTouchRotation and Screen:getTouchRotation() or -1
+    local msg = string.format("%d pts %dms | cb %.2fms x%d | %s every %dms x%d%s | rot %d touch %d %dx%d",
+        pts, total_ms, cb_avg, cb_n, path, self.refresh_interval_ms, self.timing_refresh_n or 0, fb,
+        Screen:getRotationMode(), tr, Screen:getWidth(), Screen:getHeight())
+    logger.info("Pencil timing:", msg)
+    UIManager:show(Notification:new{ text = msg, timeout = 6 })
 end
 
 -- Paint the in-progress text selection as "invert" rectangles while a
@@ -1323,6 +1367,16 @@ function Pencil:addToMainMenu(menu_items)
                     },
                 },
                 separator = true,
+            },
+            {
+                text = _("Show drawing timing on screen"),
+                help_text = _("After each stroke, show how long input handling and screen updates took. For diagnosing lag."),
+                checked_func = function()
+                    return self.show_timing == true
+                end,
+                callback = function()
+                    self.show_timing = not self.show_timing
+                end,
             },
             {
                 text = _("Input debug mode"),

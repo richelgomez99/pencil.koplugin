@@ -15,6 +15,9 @@ KOReader's normal refresh path.
 
 local M = {}
 
+-- Timing counters, reset by the plugin at stroke start.
+M.stats = { n = 0, blit_us = 0, eink_us = 0 }
+
 -- Returns a function refresh(x, y, w, h) in logical screen coordinates,
 -- or nil when not on Android / something needed is missing.
 function M.install(Screen, logger)
@@ -39,7 +42,9 @@ function M.install(Screen, logger)
     local buffer = ffi.new("ANativeWindow_Buffer[1]")
     local dirty = ffi.new("ARect[1]")
 
+    local time = require("ui/time")
     local function refresh(x, y, w, h)
+        local t0 = time.now()
         local ext_bb = Screen.full_bb or Screen.bb
         x, y, w, h = ext_bb:getBoundedRect(x, y, w, h)
         if not w or w <= 0 or h <= 0 then return end
@@ -87,10 +92,16 @@ function M.install(Screen, logger)
         end
 
         android.lib.ANativeWindow_unlockAndPost(window)
+        local t1 = time.now()
 
         if eink_full then
             Screen:_updatePartial(fast, delay_fast, x, y, w, h)
         end
+        local t2 = time.now()
+        local st = M.stats
+        st.n = st.n + 1
+        st.blit_us = st.blit_us + time.to_us(t1 - t0)
+        st.eink_us = st.eink_us + time.to_us(t2 - t1)
     end
 
     if logger then logger.info("Pencil: Android region refresh installed") end
